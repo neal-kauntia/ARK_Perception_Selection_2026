@@ -1,0 +1,312 @@
+\documentclass[journal]{IEEEtran}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{orange},
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray}
+}
+
+\title{Medial Axis Detection of a Moving Surgical Tool\\Using a Custom Hough Line Transform}
+\author{Neal Kauntia\\ ARK Fresher Selection Task 2.3}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document describes a complete pipeline for detecting and visualizing the medial 
+axis (central skeletal line) of a moving surgical tool in a video sequence. The 
+approach consists of four stages: background subtraction using MOG2, morphological 
+image cleaning, Sobel-based edge detection, and a from-scratch Hough Line Transform 
+implementation. The two strongest parallel edge lines are detected in the Hough 
+accumulator, and their geometric midpoint defines the medial axis, which is overlaid 
+on the original video frames. The algorithm was developed and debugged without using 
+any built-in Hough transform functions, in compliance with the task constraints.
+\end{abstract}
+
+\section{Introduction}
+Detecting the medial axis of a thin, elongated surgical tool in video is a problem 
+with direct applications in robotic surgery, augmented reality overlays, and 
+instrument tracking. The tool appears as a narrow, bright, approximately straight 
+object moving against a cluttered background. Its medial axis — the line equidistant 
+from both long edges — defines the tool's orientation and position.
+
+The core algorithmic challenge is computing this axis without any built-in line 
+detection functions. This requires implementing the Hough Line Transform from 
+mathematical first principles: constructing the $(\rho, \theta)$ accumulator, 
+voting for each edge pixel, and interpreting the accumulator to extract line parameters.
+
+\section{Problem Statement}
+Given a video of a moving surgical tool:
+\begin{itemize}
+    \item \textbf{Input:} Raw RGB video frames containing the surgical tool against 
+    a mostly static background.
+    \item \textbf{Objective:} For each frame, detect the medial axis of the tool 
+    and draw it as a green line overlay on the original frame.
+    \item \textbf{Pipeline:} Background subtraction $\rightarrow$ image cleaning 
+    $\rightarrow$ edge detection $\rightarrow$ Hough transform $\rightarrow$ 
+    medial axis computation.
+    \item \textbf{Constraint:} \texttt{cv.HoughLines} and \texttt{cv.HoughLinesP} 
+    are forbidden. The full Hough accumulator must be built manually.
+\end{itemize}
+
+\section{Related Work}
+\textbf{MOG2 Background Subtraction} models each pixel as 
+a mixture of Gaussians, adaptively updating the model over time. It robustly 
+separates foreground objects from a dynamic background and is the standard method 
+for surgical instrument segmentation in video.
+
+\textbf{Hough Line Transform} maps each edge pixel 
+$(x, y)$ to a sinusoidal curve in $(\rho, \theta)$ parameter space via the 
+relation $\rho = x\cos\theta + y\sin\theta$. Lines in image space correspond 
+to peaks in the voting array. The standard form uses $\rho \in [-d, d]$ where 
+$d$ is the image diagonal, and $\theta \in [0°, 180°)$.
+
+\textbf{Medial Axis} of a shape is the locus of centres of 
+maximal inscribed circles. For a thin elongated shape such as a surgical tool, 
+this reduces to the centreline between the two parallel long edges, which can 
+be computed as the average of the two detected parallel Hough lines.
+
+\section{Initial Attempts}
+
+\subsection{Attempt 1: Single Peak Extraction}
+The first version of the Hough analysis extracted only the single strongest 
+peak from the vote
+
+and used that as the medial axis directly.
+
+\begin{lstlisting}
+best_index = np.argmax(vote.flatten())
+rho_index, theta_index = np.unravel_index(best_index, vote.shape)
+\end{lstlisting}
+
+\textbf{Problem:} The strongest peak corresponds to one edge of the tool, 
+not the centre. The resulting line was consistently offset to one side of 
+the tool. No medial axis was computed — this was simply the most prominent edge.
+
+\subsection{Attempt 2: Column-Sum Based Theta Selection with Rho Averaging}
+The second version searched for the dominant $\theta$ by summing vote 
+columns (all $\rho$ values for each $\theta$), then extracted two rho values 
+at that theta.
+
+\textbf{Bug discovered:} The selected \texttt{medialtheta} was stored as a 
+raw index (integer 0--179) rather than the actual angle in radians. Passing 
+this integer to \texttt{numpy.cos()} computed the cosine of 0--179 \emph{radians} 
+(wrapping many times around the unit circle), producing a completely wrong 
+line direction. This was the primary cause of the line appearing perpendicular 
+to the tool. The fix was to convert: \texttt{best\_theta = thetas[best\_theta\_index]}.
+
+A secondary bug: the along-line direction vector was computed as 
+\texttt{dx = -b, dy = a} with \texttt{a = cos(theta), b = sin(theta)}. 
+This gives the \emph{normal} direction (perpendicular to the line), not the 
+tangent. The correct tangent direction is \texttt{dx = -sin(theta), dy = cos(theta)}.
+
+\subsection{Attempt 3: Parallel Line Search for True Medial Axis}
+After fixing the above bugs, the approach was extended to search for two 
+parallel lines (similar $\theta$, different $\rho$) to properly define 
+the medial axis as their average.
+
+\begin{lstlisting}
+# Sorted vote peaks
+index = np.argsort(vote.flatten())[::-1]
+rho_index1, theta_index1 = np.unravel_index(index[0], vote.shape)
+
+# Finding second parallel line
+for i in indices[1:]:
+    rho_index2, theta_index2 = np.unravel_index(i, vote.shape)
+    if abs(thetas[theta_index1] - thetas[theta_index2]) < np.deg2rad(5):
+        break
+
+rho1 = rhos[rho_index1]
+theta1 = thetas[theta_index1]
+rho2 = rhos[rho_index2]
+theta2 = thetas[theta_index2]
+
+medianrho   = (rho1 + rho2) / 2
+mediantheta = (theta1 + theta2) / 2
+\end{lstlisting}
+
+This correctly identifies the two long edges of the tool (which are parallel) 
+and averages their $\rho$ and $\theta$ to place the medial axis exactly between them.
+
+\section{Final Approach}
+
+\subsection{Stage 1: Background Subtraction}
+\begin{lstlisting}
+bgsub = cv.createBackgroundSubtractorMOG2(detectShadows=False)
+subfr = bgsub.apply(frame)
+\end{lstlisting}
+
+MOG2 with \texttt{detectShadows=False} isolates the moving tool as a white 
+foreground mask. Shadow detection is disabled as it adds unnecessary grey 
+regions that complicate subsequent edge detection.
+
+\subsection{Stage 2: Image Cleaning}
+\begin{lstlisting}
+medianbl = cv.medianBlur(subfr, 5)
+gauss = cv.GaussianBlur(medianbl, (3, 3), 0.5)
+close = cv.getStructuringElement(cv.MORPH_RECT, (3,3))
+morph = cv.morphologyEx(gauss, cv.MORPH_CLOSE, close)
+\end{lstlisting}
+
+Median filtering first removes salt-and-pepper noise from the MOG2 mask. 
+Gaussian blur then smooths the mask to improve Sobel gradient quality. 
+Morphological closing fills small holes in the tool silhouette — important 
+because thin tools can appear broken after background subtraction.
+
+\subsection{Stage 3: Sobel Edge Detection}
+\begin{lstlisting}
+sx    = cv.Sobel(morph, cv.CV_64F, 1, 0, ksize=3)
+sy    = cv.Sobel(morph, cv.CV_64F, 0, 1, ksize=3)
+totder = np.sqrt(sx**2 + sy**2)
+binary     = (totder > 50).astype(np.uint8)
+\end{lstlisting}
+
+Sobel operators compute the gradient magnitude at each pixel. The threshold 
+of 50 on the magnitude selects only strong edges, reducing the number of 
+edge pixels that must be voted in the Hough accumulator and improving 
+peak sharpness.
+
+\subsection{Stage 4: Custom Hough Line Transform}
+For each edge pixel $(x, y)$ 
+and each candidate angle $\theta$:
+\begin{equation}
+\rho = x\cos\theta + y\sin\theta
+\end{equation}
+The corresponding voting array cell $(\rho + d, \theta_{index})$ is incremented, 
+where $d$ is the image diagonal used to offset $\rho$ to a non-negative index.
+
+\begin{lstlisting}
+height, width = binary.shape
+diag = int(np.sqrt(height**2 + width**2))
+
+rhos = np.arange(-diag, diag + 1, 1)
+thetas = np.deg2rad(np.arange(0, 180))
+
+vote = np.zeros((len(rhos), len(thetas)), dtype=np.uint64)
+non_zero_y, non_zero_x = np.nonzero(binary)
+
+for i in range(len(non_zero_x)):
+    x = non_zero_x[i]
+    y = non_zero_y[i]
+    for theta_index in range(len(thetas)):
+        theta = thetas[theta_index]
+        rho = int(x * np.cos(theta) + y *np.sin(theta))
+        rho_index = rho + diag
+        vote[rho_index, theta_index] += 1
+\end{lstlisting}
+
+\subsection{Stage 5: Parallel Line Extraction and Medial Axis}
+The voting array is sorted to find the strongest peak (first edge line), 
+then the second-strongest peak within $5°$ degrees of the first (second parallel edge):
+
+\begin{lstlisting}
+index = np.argsort(vote.flatten())[::-1]
+rho_index1, theta_index1 = np.unravel_index(index[0], vote.shape)
+    
+for i in index[1:]:
+    rho_index2, theta_index2 = np.unravel_index(i, vote.shape)
+    if abs(thetas[theta_index1] - thetas[theta_index2]) < np.deg2rad(5):
+        break
+
+rho1 = rhos[rho_index1],theta1 = thetas[theta_index1]
+rho2 = rhos[rho_index2],theta2 = thetas[theta_index2]
+
+medianrho = (rho1 + rho2) / 2
+mediantheta = (theta1 + theta2) / 2
+
+\end{lstlisting}
+
+The medial axis line is drawn using the normal-form to Cartesian conversion:
+
+\begin{align}
+x_0 &= \cos(\theta_{med}) \cdot \rho_{med} \\
+y_0 &= \sin(\theta_{med}) \cdot \rho_{med} \\
+\Delta x &= -\sin(\theta_{med}), \quad \Delta y = \cos(\theta_{med})
+\end{align}
+
+\begin{lstlisting}
+a = np.cos(mediantheta), b = np.sin(mediantheta)
+
+x0 = a * medianrho, y0 = b * medianrho
+
+dx = -b, dy = a
+
+x1 = int(x0 + 1000 * dx), y1 = int(y0 + 1000 * dy)
+x2 = int(x0 - 1000 * dx) ,y2 = int(y0 - 1000 * dy)
+
+cv.line(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
+\end{lstlisting}
+
+
+
+\section{Results and Observations}
+\begin{itemize}
+    \item The medial axis line is correctly centered between the two detected 
+    edges of the surgical tool in most frames.
+    \item The $5°$ parallelism tolerance for the second line search successfully 
+    rejects background edges (which occur at very different angles) while 
+    accepting the second tool edge.
+    \item Occasional frame-to-frame flicker occurs when the tool moves rapidly 
+    and MOG2 produces an incomplete silhouette. 
+    \item The nested loop implementation is computationally intensive. For real-time 
+    use, numpy vectorisation of the accumulator fill loop (without changing 
+    the algorithmic logic) would give a significant speedup.
+\end{itemize}
+
+\section{Future Work}
+\begin{itemize}
+    \item \textbf{Temporal smoothing:} An exponential moving average on the 
+    detected $(\rho, \theta)$ parameters across frames would stabilise the 
+    medial axis against frame-to-frame noise.
+    \item \textbf{Probabilistic Hough:} A from-scratch implementation of the 
+    probabilistic variant (random subset of edge pixels voted each frame) 
+    would reduce computation while maintaining detection quality.
+    \item \textbf{Adaptive edge threshold:} Replacing the fixed Sobel threshold 
+    of 50 with Otsu's method on the gradient magnitude histogram would adapt 
+    to lighting changes across the video.
+    \item \textbf{MOG2 warmup:} Running 30 frames of background learning before 
+    processing would provide a cleaner initial foreground mask.
+\end{itemize}
+
+\section{Conclusion}
+A complete from-scratch Hough Line Transform pipeline was implemented for 
+medial axis detection of a moving surgical tool. The algorithm correctly 
+implements the $\rho = x\cos\theta + y\sin\theta$ voting, identifies 
+the two dominant parallel tool edges, and computes their geometric average 
+as the medial axis. Three non-trivial bugs were identified and fixed during 
+development — most critically, the confusion between angle index and angle 
+in radians when evaluating trigonometric functions, which caused the detected 
+line to appear perpendicular to the tool. The pipeline satisfies the task 
+constraint of zero built-in Hough transform usage.
+
+\begin{thebibliography}{1}
+\bibitem{numpy}
+https://numpy.org/devdocs/
+
+\bibitem{opencv_freecodecamp}
+Beau Carnes, https://www.freecodecamp.org/news/opencv-full-course/
+
+\bibitem{opencv_docs}
+https://docs.opencv.org/
+
+\bibitem{geeksforgeeks}
+https://www.geeksforgeeks.org/
+
+\bibitem{GitHubCommands}
+Adam Lusted (etoxin), https://gist.github.com/etoxin/1acb257550b1de60fe99
+
+\end{thebibliography}
+
+\end{document}

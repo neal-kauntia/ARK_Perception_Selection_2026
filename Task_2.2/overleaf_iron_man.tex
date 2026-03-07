@@ -1,0 +1,256 @@
+\documentclass[journal]{IEEEtran}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{orange},
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray}
+}
+
+\title{Noise Filtering for Line Drawing Preservation:\\Iron Man Image}
+\author{Neal Kauntia\\ARK Fresher Selection Task 2.3}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document describes the approach taken to remove salt noise from a heavily corrupted 
+line drawing of Iron Man (iron\_man\_noisy.jpg) while preserving the fine structural edges 
+that constitute the figure. The image suffers from high-frequency salt noise — random white 
+dots scattered uniformly across the frame — superimposed on a black-background line drawing. 
+A pipeline combining grayscale conversion, median filtering, and morphological opening was 
+developed. Extensive kernel size tuning was performed at each stage to strike the optimal 
+balance between noise removal and edge preservation. The final output (iron\_man\_final.png) 
+successfully removes the majority of salt noise while retaining sharp, continuous edge lines.
+\end{abstract}
+
+\section{Introduction}
+Salt noise in binary-style line drawings presents a unique denoising challenge. Unlike 
+natural images where some blurring is tolerable, a line drawing consists entirely of 
+thin, high-frequency edges — the very frequency band that most standard smoothing 
+filters attack. Any over-smoothing directly degrades the primary signal.
+
+The task is a balancing act: aggressive enough filtering to eliminate the noise, 
+yet gentle enough to leave the line strokes intact. This document details the problem, 
+all intermediate approaches explored, and the final chosen pipeline with justification 
+for each parameter choice.
+
+\section{Problem Statement}
+The input image \texttt{iron\_man\_noisy.jpg} is a grayscale line drawing of Iron Man 
+corrupted by dense salt noise. The characteristics of the noise and signal are:
+
+\begin{itemize}
+    \item \textbf{Noise type:} Salt noise — isolated single-pixel white dots with 
+    intensity 255 scattered at high density across the black background.
+    \item \textbf{Signal type:} White line strokes (intensity 255) of width 
+    approximately 1--3 pixels on a black (0) background.
+    \item \textbf{Core challenge:} Both noise and signal occupy the same intensity 
+    value (white), so thresholding alone cannot separate them. Spatial context 
+    must be exploited — noise pixels are isolated whereas signal pixels form 
+    connected curves.
+    \item \textbf{Success criteria:} Maximise Signal-to-Noise Ratio (SNR) while 
+    minimising structural damage to the line drawing features.
+\end{itemize}
+
+\section{Related Work}
+Common approaches for salt noise removal include:
+
+\textbf{Gaussian Blur} averages a pixel with its neighbourhood 
+using a Gaussian-weighted kernel. While effective for Gaussian noise, it blurs edges 
+proportionally to kernel size, making it poorly suited for line drawing preservation.
+
+\textbf{Median Filter} replaces each pixel with the median value 
+of its neighbourhood. It is the classical and most effective method for salt-and-pepper 
+noise because isolated noise pixels are outvoted by background neighbours, yet connected 
+edges survive if the kernel is not too large relative to line width.
+
+\textbf{Morphological Opening} (erosion followed by dilation) 
+removes small isolated bright regions (noise) that are smaller than the structuring 
+element, while preserving larger connected structures such as lines.
+
+\section{Initial Attempts}
+
+\subsection{Attempt 1: Gaussian Blur Alone}
+The first attempt applied Gaussian blur directly to the grayscale image.
+
+\begin{lstlisting}
+gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+blurred = cv.GaussianBlur(gray, (3, 3), 0.5)
+\end{lstlisting}
+
+\textbf{Kernel size tuning:} A $(3\times3)$ kernel with $\sigma=0.5$ reduced noise 
+marginally but left many salt pixels intact. Increasing to $(5\times5)$ with $\sigma=1.0$ 
+removed more noise but visibly thickened and blurred fine lines. A $(7\times7)$ kernel 
+with $\sigma=1.5$ caused unacceptable edge smearing, merging adjacent strokes into blobs. 
+Gaussian blur proved fundamentally ill-suited: to kill isolated white dots it must 
+average them, which inevitably blurs the white line strokes by the same amount.
+
+\subsection{Attempt 2: Median Blur with Various Kernel Sizes}
+Median blur was applied directly to the grayscale image.
+
+\begin{lstlisting}
+gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+result = cv.medianBlur(gray, ksize)
+\end{lstlisting}
+
+\textbf{Kernel size tuning} (kernel must be odd):
+
+\begin{table}[h]
+\centering
+\caption{Median Blur Kernel Size Comparison}
+\begin{tabular}{@{}cll@{}}
+\toprule
+Kernel Size & Noise Removed & Edge Damage \\
+\midrule
+$3\times3$ & Partial — sparse dots remain & Minimal \\
+$5\times5$ & Good — most dots gone & Slight line thinning \\
+$7\times7$ & Excellent noise removal & Noticeable stroke gaps \\
+$9\times9$ & Near-complete & Severe — thin lines break \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A $3\times3$ kernel was insufficient because the noise density was high enough that 
+some noise pixels had noise neighbours, so the median was still white. A $5\times5$ 
+kernel gave a good trade-off but left residual isolated noise clusters. This observation 
+motivated adding a morphological stage.
+
+\subsection{Attempt 3: Morphological Opening Alone}
+Opening with various kernel sizes was applied to the median-filtered image.
+
+\begin{lstlisting}
+kernel = cv.getStructuringElement(cv.MORPH_RECT, (k, k))
+opened = cv.morphologyEx(gray, cv.MORPH_OPEN, kernel)
+\end{lstlisting}
+
+\textbf{Kernel size tuning:}
+
+\begin{table}[h]
+\centering
+\caption{Morphological Opening Kernel Size Comparison}
+\begin{tabular}{@{}cll@{}}
+\toprule
+Kernel Size & Effect on Noise & Effect on Lines \\
+\midrule
+$2\times2$ & Removes truly isolated pixels & Minimal damage \\
+$3\times3$ & Removes small clusters & Thin lines slightly eroded \\
+$4\times4$ & Aggressive noise removal & Lines begin to fragment \\
+$5\times5$ & Very aggressive & Fine strokes destroyed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A $2\times2$ kernel was found optimal for the morphological stage: it is large enough 
+to erode isolated single-pixel salt noise (which cannot survive a $2\times2$ erosion) 
+yet small enough to leave connected line strokes intact, since lines of width $\geq2$ 
+pixels survive erosion by a $2\times2$ element.
+
+\section{Final Approach}
+
+The final pipeline is a three-stage process:
+
+\begin{enumerate}
+    \item \textbf{Grayscale conversion} — reduces the problem to a single channel, 
+    consistent with the binary nature of the line drawing.
+    \item \textbf{Median blur with $3\times3$ kernel} — removes the bulk of isolated 
+    salt pixels while minimally affecting connected line pixels.
+    \item \textbf{Morphological opening with $2\times2$ rectangular kernel} — 
+    cleans residual isolated or paired noise pixels that survived the median filter.
+\end{enumerate}
+
+\begin{lstlisting}
+import cv2 as cv
+
+img = cv.imread("iron_man_noisy.jpg")
+gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+
+# Stage 1: Median filter - kills isolated salt pixels
+medfil = cv.medianBlur(gray, 3)
+
+# Stage 2: Morphological opening - removes residual noise clusters
+kernel = cv.getStructuringElement(cv.MORPH_RECT, (2, 2))
+morphopen = cv.morphologyEx(medfil, cv.MORPH_OPEN, kernel)
+
+cv.imwrite("iron_man_final.png", morphopen)
+\end{lstlisting}
+
+\textbf{Why median kernel $3\times3$:} The noise consists of isolated single pixels. 
+In a $3\times3$ neighbourhood of a noise pixel surrounded by black background, 
+the median of 9 values (8 black + 1 white) is black — the noise pixel is eliminated. 
+A $5\times5$ kernel was not needed and introduced more edge damage than necessary.
+
+\textbf{Why opening kernel $2\times2$:} After median filtering, remaining noise 
+tends to be in pairs or small clusters that survived because two adjacent noise pixels 
+can outlast a $3\times3$ median. A $2\times2$ opening erodes these clusters. 
+MORPH\_RECT was chosen over MORPH\_ELLIPSE because at size $2\times2$ both are 
+equivalent, and RECT has no approximation rounding at small sizes.
+
+\textbf{Why grayscale first:} The original image is a black-and-white line drawing 
+stored as BGR. Converting to grayscale reduces memory and processing to one channel 
+without any loss of information relevant to the denoising task.
+
+\section{Results and Observations}
+The final output image shows a clean line drawing with the vast majority of salt 
+noise removed. Key observations:
+
+\begin{itemize}
+    \item Fine detail lines (e.g., the face visor, suit panel borders) are preserved 
+    with minimal thinning or breakage.
+    \item The black background is fully restored — no residual white speckle visible 
+    at normal viewing scale.
+    \item A small number of noise clusters in very high-density noise regions may 
+    persist, but the perceptual quality of the figure is fully restored.
+    \item Compared to Gaussian blur, which produced a hazy, grey-gradient result 
+    even at small kernel sizes, the median + opening pipeline preserves the binary 
+    character of the image — lines remain sharp white, background remains black.
+\end{itemize}
+
+The choice of median filtering over Gaussian is justified by its fundamental property: 
+for a pixel to change value under median filtering, more than half its neighbourhood 
+must differ from it. An isolated noise pixel always fails this test; a connected line 
+pixel always passes it (as long as the kernel is not larger than the line width).
+
+\section{Future Work}
+\begin{itemize}
+    \item \textbf{Adaptive median filtering:} Could handle varying noise density 
+    across the image by dynamically increasing the kernel size only in high-noise regions.
+    \item \textbf{Line Drawing Learning Model} A classical machine learning model — without any deep learning — could be trained on a dataset of line drawings with known noise levels to automatically predict the optimal median blur kernel size for a new unseen drawing.
+    
+\end{itemize}
+
+\section{Conclusion}
+A lightweight two-stage pipeline of median blur ($3\times3$) followed by 
+morphological opening ($2\times2$) was found to be the optimal approach for 
+removing salt noise from the Iron Man line drawing. The key insight is that 
+salt noise is spatially isolated — a property that median filtering exploits 
+directly — while Gaussian blurring is inappropriate because it treats signal 
+and noise as equivalent frequency content. The final output successfully 
+restores the clean line drawing with minimal structural damage.
+
+\begin{thebibliography}{1}
+
+\bibitem{opencv_freecodecamp}
+Beau Carnes, https://www.freecodecamp.org/news/opencv-full-course/
+
+\bibitem{opencv_docs}
+https://docs.opencv.org/
+
+\bibitem{geeksforgeeks}
+https://www.geeksforgeeks.org/
+
+\bibitem{GitHubCommands}
+Adam Lusted (etoxin), https://gist.github.com/etoxin/1acb257550b1de60fe99
+\end{thebibliography}
+
+\end{document}

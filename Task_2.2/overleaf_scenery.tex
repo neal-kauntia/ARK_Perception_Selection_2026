@@ -1,0 +1,326 @@
+\documentclass[journal]{IEEEtran}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{booktabs}
+
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{orange},
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray}
+}
+
+\title{Noise Filtering for Natural Image Restoration:\\Scenery Image}
+\author{Neal Kauntia\\ARK Fresher Selection Task 2.2}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document describes the approach taken to restore a heavily corrupted colour scenery 
+photograph (\texttt{noisy.jpg}) degraded by dense multicolour salt-and-pepper noise. 
+Unlike a binary line drawing, a natural colour image requires preservation of smooth 
+colour gradients, soft textures, and structural boundaries simultaneously. A pipeline 
+combining Gaussian pre-smoothing, Non-Local Means (NLM) denoising, and morphological 
+opening was developed. Extensive parameter tuning was performed at each stage. The 
+final output (\texttt{scenary\_final.png}) demonstrates strong noise suppression with 
+good retention of the sky gradient, horizon line, and landscape textures.
+\end{abstract}
+
+\section{Introduction}
+Natural image denoising differs fundamentally from line drawing denoising. A scenery 
+photograph contains continuous-tone regions with smooth gradients, fine texture 
+patterns, and soft edges — all of which must be preserved under denoising. The noise 
+in \texttt{noisy.jpg} is multicolour (RGB channel-independent salt-and-pepper noise), 
+which means each channel must be treated, and cross-channel correlations must be 
+respected to avoid colour fringing artefacts.
+
+This document covers the problem analysis, all intermediate approaches explored, 
+parameter tuning decisions, and the rationale for the final chosen method.
+
+\section{Problem Statement}
+The input image \texttt{noisy.jpg} shows a landscape scene — sky gradient transitioning 
+to a hilly silhouette — corrupted by very dense multicolour noise. Key characteristics:
+
+\begin{itemize}
+    \item \textbf{Noise type:} Dense salt-and-pepper noise on all three RGB channels 
+    independently. Individual pixels display random saturated colours far from their 
+    true value.
+    \item \textbf{Signal type:} A colour photograph with smooth sky gradients 
+    (cyan-to-blue transition), a teal horizontal band, and dark hill silhouettes.
+    \item \textbf{Core challenge:} Noise density is so high that local filters 
+    operating on small windows may still have a majority of noisy pixels in the 
+    window, causing them to fail. A larger search window or non-local approach 
+    is required.
+    \item \textbf{Constraints:} Colour fidelity must be preserved — hue shifts 
+    from channel-independent processing are unacceptable.
+\end{itemize}
+
+\section{Related Work}
+\textbf{Gaussian Blur} is a linear smoothing filter. It handles 
+Gaussian noise well but spreads colour noise energy across neighbouring pixels 
+rather than removing it, resulting in a blurry, colour-smeared output.
+
+\textbf{Median Blur} is highly effective for monochrome salt-and-pepper 
+noise but its channel-independent application to colour images can cause hue artefacts. 
+\texttt{cv.medianBlur} in OpenCV operates per-channel in colour mode, which can 
+introduce colour shifts at edges.
+
+\textbf{Non-Local Means (NLM)} searches a large region of the 
+image for patches similar to the patch around the target pixel, and averages them 
+weighted by patch similarity. It is particularly well-suited for high-density noise 
+because its large search window finds uncorrupted similar patches even when local 
+neighbours are mostly noisy. \texttt{cv.fastNlMeansDenoisingColored} applies NLM 
+jointly in the LAB colour space, preserving colour consistency.
+
+\textbf{Morphological Opening} after NLM removes any residual 
+isolated bright noise clusters not fully averaged out by NLM.
+
+\section{Initial Attempts}
+
+\subsection{Attempt 1: Gaussian Blur Alone}
+\begin{lstlisting}
+result = cv.GaussianBlur(img, (k, k), sigma)
+\end{lstlisting}
+
+\textbf{Kernel and sigma tuning:}
+
+\begin{table}[h]
+\centering
+\caption{Gaussian Blur Parameter Tuning}
+\begin{tabular}{@{}ccll@{}}
+\toprule
+Kernel & $\sigma$ & Noise Reduction & Side Effects \\
+\midrule
+$3\times3$ & 0.5 & Very low & Colour fringing persists \\
+$5\times5$ & 1.0 & Moderate & Scene blurred, edges soft \\
+$7\times7$ & 1.5 & Better & Horizon line lost \\
+$11\times11$ & 2.5 & High & Image unrecognisably blurry \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Gaussian blur distributes noise energy into neighbors rather than removing it — 
+at small kernels the noise remains; at large kernels the image is destroyed. 
+It was ruled out as the primary denoising method.
+
+\subsection{Attempt 2: Median Blur with Various Kernel Sizes}
+\begin{lstlisting}
+result = cv.medianBlur(img, ksize)  # applied to colour image
+\end{lstlisting}
+
+\textbf{Kernel size tuning:}
+
+\begin{table}[h]
+\centering
+\caption{Median Blur Kernel Size Comparison on Colour Image}
+\begin{tabular}{@{}cll@{}}
+\toprule
+Kernel & Noise Removed & Side Effects \\
+\midrule
+$3\times3$ & Low — dense noise survives & Minimal damage \\
+$5\times5$ & Moderate & Slight colour bleed at edges \\
+$7\times7$ & Good & Noticeable texture smearing \\
+$9\times9$ & Strong & Sky gradient steps/bands appear \\
+$11\times11$ & Very strong & Colour posterisation, gradient lost \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Median filtering on its own was insufficient at the noise density present in this image. 
+At $3\times3$ and $5\times5$, the noise density is so high that a majority of pixels 
+in the window are still noisy, so the median remains a noisy value. Larger kernels 
+introduced gradient banding and texture destruction. This motivated moving to NLM.
+
+\subsection{Attempt 3: Non-Local Means Alone — Parameter Tuning}
+\begin{lstlisting}
+result = cv.fastNlMeansDenoisingColored(
+    img, None,
+    h=h_val, hColor=hc_val,
+    templateWindowSize=tw,
+    searchWindowSize=sw
+)
+\end{lstlisting}
+
+\textbf{Parameter definitions:}
+\begin{itemize}
+    \item \texttt{h}: Filter strength for luminance. Higher = more denoising but 
+    more detail loss.
+    \item \texttt{hColor}: Filter strength for colour channels. Should typically 
+    equal or be slightly less than \texttt{h}.
+    \item \texttt{templateWindowSize}: Size of the patch used for similarity 
+    comparison. Larger = more context but slower. Must be odd.
+    \item \texttt{searchWindowSize}: Size of the region searched for similar 
+    patches. Larger = better denoising but much slower. Must be odd.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\caption{NLM Parameter Tuning Results}
+\begin{tabular}{@{}cccll@{}}
+\toprule
+h & hColor & templateW & searchW & Observation \\
+\midrule
+5 & 5 & 7 & 15 & Insufficient — noise remains \\
+10 & 10 & 7 & 21 & Good balance — chosen base \\
+15 & 10 & 7 & 21 & Over-smoothed — sky texture lost \\
+10 & 10 & 5 & 21 & Slightly weaker colour recovery \\
+10 & 10 & 7 & 35 & Better but very slow \\
+20 & 15 & 9 & 21 & Strong noise removal, gradient slightly flat \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\texttt{h=10, hColor=10, templateWindowSize=7, searchWindowSize=21} provided the 
+best balance: noise substantially removed, sky gradient intact, and hill silhouette 
+edges preserved. Larger \texttt{h} values caused the sky gradient to flatten 
+perceptibly.
+
+\subsection{Attempt 4: Gaussian Pre-smoothing before NLM}
+The observation that NLM still left some residual high-frequency colour noise 
+at \texttt{h=10} led to adding a light Gaussian pre-smoothing step.
+
+\begin{lstlisting}
+gaus = cv.GaussianBlur(img, (k, k), sigma)
+result = cv.fastNlMeansDenoisingColored(gaus, ...)
+\end{lstlisting}
+
+\textbf{Kernel tuning for pre-smoothing Gaussian:}
+
+\begin{table}[h]
+\centering
+\caption{Gaussian Pre-smoothing Kernel Tuning}
+\begin{tabular}{@{}ccl@{}}
+\toprule
+Kernel & $\sigma$ & Effect on NLM Input \\
+\midrule
+$3\times3$ & 0.5 & Subtle — slightly improves NLM patch similarity \\
+$5\times5$ & 1.0 & Noticeable improvement — residual noise clusters reduced \\
+$7\times7$ & 1.5 & Pre-smoothing too strong — edges enter NLM already blurred \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A $(3\times3)$ Gaussian with $\sigma=0.5$ was chosen: it reduces the amplitude of 
+extreme noise pixels just enough to improve NLM's patch-similarity computation 
+without pre-blurring the actual scene features that NLM needs to find good matches for.
+
+\subsection{Attempt 5: Morphological Opening Kernel Tuning}
+After NLM, occasional small bright clusters remain. Morphological opening was added 
+as a final clean-up step.
+
+\begin{lstlisting}
+kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (k, k))
+morph = cv.morphologyEx(result, cv.MORPH_OPEN, kernel)
+\end{lstlisting}
+
+\textbf{Kernel shape and size tuning:}
+
+\begin{table}[h]
+\centering
+\caption{Morphological Opening Kernel Tuning}
+\begin{tabular}{@{}ccll@{}}
+\toprule
+Shape & Size & Noise Removed & Scene Damage \\
+\midrule
+RECT & $2\times2$ & Small isolated clusters & Minimal \\
+ELLIPSE & $2\times2$ & Same as RECT at this size & Minimal \\
+RECT & $3\times3$ & Slightly more & Faint texture erosion \\
+ELLIPSE & $3\times3$ & Slightly more, rotationally symmetric & Minimal \\
+ELLIPSE & $4\times4$ & Aggressive & Colour regions slightly eroded \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+MORPH\_ELLIPSE at $(2\times2)$ was selected. The elliptical shape is preferable 
+for natural images because it has no preferred axis direction, avoiding the 
+directional bias of a rectangular kernel at larger sizes. At $2\times2$ the 
+practical difference is negligible, but ELLIPSE was retained as best practice.
+
+\section{Final Approach}
+The final pipeline:
+
+\begin{enumerate}
+    \item \textbf{Light Gaussian pre-smoothing} $(3\times3)$, $\sigma=0.5$ — 
+    attenuates the most extreme noise pixel amplitudes to improve NLM patch matching.
+    \item \textbf{NLM denoising} (\texttt{h=10, hColor=10, templateWindowSize=7, 
+    searchWindowSize=21}) — primary denoising stage, exploits non-local patch 
+    self-similarity to remove dense noise while preserving colour gradients.
+    \item \textbf{Morphological opening} (ELLIPSE $2\times2$) — removes residual 
+    isolated noise clusters not fully handled by NLM.
+\end{enumerate}
+
+\begin{lstlisting}
+import cv2 as cv
+
+img = cv.imread("noisy.jpg")
+
+# Stage 1: Light Gaussian pre-smoothing
+gaus = cv.GaussianBlur(img, (3, 3), 0.5)
+
+# Stage 2: Non-Local Means - primary denoising
+result = cv.fastNlMeansDenoisingColored(
+    gaus, None,
+    h=10, hColor=10,
+    templateWindowSize=7,
+    searchWindowSize=21
+)
+
+# Stage 3: Morphological opening - residual noise cleanup
+kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, (2, 2))
+morph = cv.morphologyEx(result, cv.MORPH_OPEN, kernel)
+
+cv.imwrite("scenary_final.png", morph)
+\end{lstlisting}
+
+\section{Results and Observations}
+\begin{itemize}
+    \item The sky gradient (cyan-to-blue) is smoothly restored with no banding 
+    or posterisation artefacts.
+    \item The teal horizontal band across the middle of the scene is clearly 
+    visible and correctly coloured.
+    \item The dark hill silhouette at the bottom is intact with sharp boundary 
+    preservation.
+    \item Residual very fine texture noise may be visible under high magnification 
+    but is imperceptible at normal viewing scale.
+    \item NLM's LAB-space operation is the critical factor for colour fidelity — 
+    processing luminance and colour channels with appropriate separate strengths 
+    prevents the hue shifts seen with naive per-channel median filtering.
+\end{itemize}
+
+
+
+\section{Conclusion}
+For the colour scenery image with dense multicolour noise, Non-Local Means 
+denoising with light Gaussian pre-smoothing and morphological post-processing 
+was found to be the optimal pipeline. The key advantage of NLM over local 
+filters is its large search window: in very high noise density conditions, 
+local filters fail because the majority of nearby pixels are corrupted, 
+whereas NLM finds clean matching patches from across the image. Parameter 
+tuning revealed that \texttt{h=10, hColor=10, templateWindowSize=7, searchWindowSize=21} 
+best balanced noise suppression against colour gradient and texture preservation.
+
+\begin{thebibliography}{1}
+\bibitem{opencv_freecodecamp}
+Beau Carnes, https://www.freecodecamp.org/news/opencv-full-course/
+
+\bibitem{opencv_docs}
+https://docs.opencv.org/
+
+\bibitem{geeksforgeeks}
+https://www.geeksforgeeks.org/
+
+\bibitem{GitHubCommands}
+Adam Lusted (etoxin), https://gist.github.com/etoxin/1acb257550b1de60fe99
+
+\end{thebibliography}
+
+\end{document}
