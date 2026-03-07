@@ -6,65 +6,61 @@ delta = 0
 ddepth = cv.CV_16S
 
 vid = cv.VideoCapture("3.mp4")
-fgbg = cv.createBackgroundSubtractorMOG2(detectShadows=False)
+bgsub = cv.createBackgroundSubtractorMOG2(detectShadows=False)
 
 while True:
     success, frame = vid.read()
     if not success or frame is None:
         break
 
-    fgmask = fgbg.apply(frame)
-    medianbl = cv.medianBlur(fgmask, 5)
+    subfr = bgsub.apply(frame)
+    medianbl = cv.medianBlur(subfr, 5)
     gauss = cv.GaussianBlur(medianbl, (3, 3), 0.5)
-    kernel_close = cv.getStructuringElement(cv.MORPH_RECT, (3,3))
-    morph = cv.morphologyEx(gauss, cv.MORPH_CLOSE, kernel_close)
+    close = cv.getStructuringElement(cv.MORPH_RECT, (3,3))
+    morph = cv.morphologyEx(gauss, cv.MORPH_CLOSE, close)
 
-    sobelx = cv.Sobel(morph, cv.CV_64F, 1, 0, ksize=3)
-    sobely = cv.Sobel(morph, cv.CV_64F, 0, 1, ksize=3)
+    sx = cv.Sobel(morph, cv.CV_64F, 1, 0, ksize=3)
+    sy = cv.Sobel(morph, cv.CV_64F, 0, 1, ksize=3)
 
-    magnitude = np.sqrt(sobelx**2 + sobely**2)
-    edges = magnitude > 50
-    edges = edges.astype(np.uint8)
+    totder = np.sqrt(sx**2 + sy**2)
+    binary = totder > 50
+    binary = binary.astype(np.uint8) #converting to 0s and 1s 
 
-    height, width = edges.shape
-    diag_len = int(np.sqrt(height**2 + width**2))
+    height, width = binary.shape
+    diag = int(np.sqrt(height**2 + width**2))
 
-    rhos = np.arange(-diag_len, diag_len + 1, 1)
+    rhos = np.arange(-diag, diag + 1, 1)
     thetas = np.deg2rad(np.arange(0, 180))
 
-    accumulator = np.zeros((len(rhos), len(thetas)), dtype=np.uint64)
-    y_idxs, x_idxs = np.nonzero(edges)
+    vote = np.zeros((len(rhos), len(thetas)), dtype=np.uint64)
+    non_zero_y, non_zero_x = np.nonzero(binary)
 
-    for i in range(len(x_idxs)):
-        x = x_idxs[i]
-        y = y_idxs[i]
-        for theta_idx in range(len(thetas)):
-            theta = thetas[theta_idx]
+    for i in range(len(non_zero_x)):
+        x = non_zero_x[i]
+        y = non_zero_y[i]
+        for theta_index in range(len(thetas)):
+            theta = thetas[theta_index]
             rho = int(x * np.cos(theta) + y * np.sin(theta))
-            rho_index = rho + diag_len
-            accumulator[rho_index, theta_idx] += 1
+            rho_index = rho + diag
+            vote[rho_index, theta_index] += 1
 
 
-    # Sort accumulator values
-    indices = np.argsort(accumulator.flatten())[::-1]
+    index = np.argsort(vote.flatten())[::-1]
 
-    # First strongest line
-    rho_idx1, theta_idx1 = np.unravel_index(indices[0], accumulator.shape)
+    
+    rho_index1, theta_index1 = np.unravel_index(index[0], vote.shape)
 
-    # Find second strongest line that is parallel
-    for idx in indices[1:]:
-        rho_idx2, theta_idx2 = np.unravel_index(idx, accumulator.shape)
-        #To check for parallel edge lines 
-        if abs(thetas[theta_idx1] - thetas[theta_idx2]) < np.deg2rad(5):
+    
+    for i in index[1:]:
+        rho_index2, theta_index2 = np.unravel_index(i, vote.shape)
+        if abs(thetas[theta_index1] - thetas[theta_index2]) < np.deg2rad(5):
             break
 
-    # Convert to actual values
-    rho1 = rhos[rho_idx1]
-    theta1 = thetas[theta_idx1]
+    rho1 = rhos[rho_index1]
+    theta1 = thetas[theta_index1]
 
-    rho2 = rhos[rho_idx2]
-    theta2 = thetas[theta_idx2]
-    # Stage 5: Medial axis
+    rho2 = rhos[rho_index2]
+    theta2 = thetas[theta_index2]
     
 
     medianrho = (rho1 + rho2) / 2
@@ -85,7 +81,7 @@ while True:
     x2 = int(x0 - 1000 * dx)
     y2 = int(y0 - 1000 * dy)
 
-    cv.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    cv.line(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
     cv.imshow("result", frame)
 
     if cv.waitKey(30) & 0xFF == 27:
